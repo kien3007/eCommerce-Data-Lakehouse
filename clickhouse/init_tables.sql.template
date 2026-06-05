@@ -1,0 +1,111 @@
+CREATE DATABASE IF NOT EXISTS lakehouse;
+
+-- Drop existing tables to allow schema updates
+DROP VIEW IF EXISTS lakehouse.vw_rt_enriched_logs;
+DROP DICTIONARY IF EXISTS lakehouse.dict_user_cohort;
+DROP TABLE IF EXISTS lakehouse.s3_user_cohort;
+DROP TABLE IF EXISTS lakehouse.mv_kafka_to_rt_logs;
+DROP TABLE IF EXISTS lakehouse.rt_log_metrics;
+DROP TABLE IF EXISTS lakehouse.kafka_log_tracking_raw;
+
+-- 1. Kafka Engine Table: Connects directly to the Kafka topic
+CREATE TABLE IF NOT EXISTS lakehouse.kafka_log_tracking_raw
+(
+    event_time Nullable(String),
+    event_type Nullable(String),
+    product_id Nullable(String),
+    category_id Nullable(String),
+    category_code Nullable(String),
+    brand Nullable(String),
+    price Nullable(Float32),
+    user_id Nullable(String),
+    user_session Nullable(String)
+) ENGINE = Kafka
+SETTINGS kafka_broker_list = 'kafka:29092',
+         kafka_topic_list = 'log-tracking-raw',
+         kafka_group_name = 'clickhouse-consumer',
+         kafka_format = 'AvroConfluent',
+         format_avro_schema_registry_url = 'http://schema-registry:8081';
+
+-- 2. MergeTree Table: Stores the full wide-column schema for real-time analytics
+CREATE TABLE IF NOT EXISTS lakehouse.rt_log_metrics
+(
+    event_time DateTime,
+    event_type String,
+    product_id String,
+    category_id String,
+    category_code String,
+    brand String,
+    price Float32,
+    user_id String,
+    user_session String
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMMDD(event_time)
+ORDER BY (event_time, user_id);
+
+-- 3. Materialized View: Ingests data from Kafka to MergeTree, handling NULL values
+CREATE MATERIALIZED VIEW IF NOT EXISTS lakehouse.mv_kafka_to_rt_logs
+TO lakehouse.rt_log_metrics
+AS SELECT
+    toDateTime(substring(assumeNotNull(event_time), 1, 19)) AS event_time,
+    assumeNotNull(event_type) AS event_type,
+    ifNull(product_id, '') AS product_id,
+    ifNull(category_id, '') AS category_id,
+    ifNull(category_code, '') AS category_code,
+    ifNull(brand, '') AS brand,
+    ifNull(price, 0.0) AS price,
+    ifNull(user_id, '') AS user_id,
+    ifNull(user_session, '') AS user_session
+FROM lakehouse.kafka_log_tracking_raw
+WHERE event_time IS NOT NULL AND user_id IS NOT NULL;
+
+-- 4. Intermediate S3 Table for Dictionary
+CREATE TABLE IF NOT EXISTS lakehouse.s3_user_cohort
+(
+    user_id String,
+    event_time String,
+    event_type String,
+    product_id String,
+    category_id String,
+    category_code String,
+    brand String,
+    price String,
+    user_session String,
+    event_date String,
+    first_event_date String,
+    start_of_week String,
+    week_number String,
+    end_of_week String,
+    week_text String,
+    cohort_index_week String,
+    week_after String
+) ENGINE = S3('http://minio:9000/raw/purchase-behavior/02-purchase-behavior.csv', '${MINIO_ROOT_USER}', '${MINIO_ROOT_PASSWORD}', 'CSVWithNames');
+
+-- 5. Dictionary: Load static cohort data from MinIO into RAM for fast JOINs
+CREATE DICTIONARY IF NOT EXISTS lakehouse.dict_user_cohort
+(
+    user_id String,
+    first_event_date String,
+    start_of_week String,
+    cohort_index_week String
+)
+PRIMARY KEY user_id
+SOURCE(CLICKHOUSE(
+    HOST 'localhost'
+    PORT 9000
+    USER '${CLICKHOUSE_USER}'
+    PASSWORD '${CLICKHOUSE_PASSWORD}'
+    DB 'lakehouse'
+    TABLE 's3_user_cohort'
+))
+LAYOUT(COMPLEX_KEY_HASHED())
+LIFETIME(MIN 3600 MAX 7200);
+
+-- 5. Enriched View: Real-time table joined with Cohort Dictionary for Superset
+CREATE VIEW IF NOT EXISTS lakehouse.vw_rt_enriched_logs AS
+SELECT 
+    *,
+    dictGet('lakehouse.dict_user_cohort', 'first_event_date', tuple(user_id)) AS first_event_date,
+    dictGet('lakehouse.dict_user_cohort', 'start_of_week', tuple(user_id)) AS start_of_week,
+    dictGet('lakehouse.dict_user_cohort', 'cohort_index_week', tuple(user_id)) AS cohort_index_week
+FROM lakehouse.rt_log_metrics;

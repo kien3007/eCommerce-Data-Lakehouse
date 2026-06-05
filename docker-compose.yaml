@@ -1,0 +1,447 @@
+---
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  env_file: .env
+  environment:
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}
+    AIRFLOW__CELERY__RESULT_BACKEND: ${AIRFLOW__CELERY__RESULT_BACKEND}
+    AIRFLOW__CELERY__BROKER_URL: ${AIRFLOW__CELERY__BROKER_URL}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES:-false}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    - ./spark_jobs:/opt/spark_jobs
+    - ./dataset:/opt/dataset
+  user: "${AIRFLOW_UID:-50000}:0"
+  networks:
+    - lakehouse
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+
+  # ===========================================================
+  # ZOOKEEPER — Kafka dependency
+  # ===========================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    hostname: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "localhost", "2181" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # KAFKA — Event Stream Broker
+  # 2 listeners:
+  #   - INTERNAL (29092): used within Docker network
+  #   - EXTERNAL (9092):  used from host machine (kafka_producer.py)
+  # ===========================================================
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    hostname: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092" # Host access (used for local producer)
+      - "29092:29092" # Internal Docker network
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168  # 7 days — prevents data loss if Spark is down
+    healthcheck:
+      test: [ "CMD", "kafka-topics", "--bootstrap-server", "localhost:29092", "--list" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # SCHEMA REGISTRY — Manage Avro schemas for Kafka messages
+  # ===========================================================
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    container_name: schema-registry
+    hostname: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8081/subjects" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # KAFKA UI — Web UI to debug Kafka topics/messages
+  # Access: http://localhost:8080
+  # ===========================================================
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    depends_on:
+      - schema-registry
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # MINIO — S3-compatible Object Storage (AWS S3 alternative)
+  # API:     http://localhost:9000
+  # Console: http://localhost:9001 (Web UI)
+  # ===========================================================
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    hostname: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # S3 API endpoint
+      - "9001:9001" # Web Console
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # MINIO INIT — Automatically create buckets on startup
+  # Runs once and exits (not a long-running service)
+  # Buckets created:
+  #   - warehouse/   → Iceberg tables (bronze, silver, gold)
+  #   - raw/         → Raw CSV files (immutable)
+  #   - quarantine/  → Data quality error records
+  # ===========================================================
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: >
+      /bin/sh -c " mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; mc mb --ignore-existing local/warehouse; mc mb --ignore-existing local/raw; mc mb --ignore-existing local/quarantine; echo 'Buckets created: warehouse, raw, quarantine'; "
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # CLICKHOUSE — Real-time OLAP Database
+  # HTTP API: http://localhost:8123
+  # Native:   localhost:9100 (changed from 9000 to avoid MinIO conflict)
+  # ===========================================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: clickhouse
+    hostname: clickhouse
+    ports:
+      - "8123:8123" # HTTP interface
+      - "9100:9000" # Native interface (changed to 9100 to avoid MinIO conflict)
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "-q", "http://localhost:8123/ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # ICEBERG REST CATALOG — Metadata catalog for Iceberg tables
+  # Lighter than Hive Metastore (no Hadoop/Thrift needed)
+  # API: http://localhost:8181
+  # Trino and Spark both connect here to read/write Iceberg metadata
+  # ===========================================================
+  iceberg-rest:
+    image: tabulario/iceberg-rest:latest
+    container_name: iceberg-rest
+    hostname: iceberg-rest
+    depends_on:
+      minio:
+        condition: service_healthy
+    ports:
+      - "8181:8181"
+    environment:
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_ACCESS__KEY__ID: ${AWS_ACCESS_KEY_ID}
+      CATALOG_S3_SECRET__ACCESS__KEY: ${AWS_SECRET_ACCESS_KEY}
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: ${AWS_REGION}
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # SPARK MASTER — Cluster Manager UI
+  # Web UI: http://localhost:8082
+  # Uses apache/spark (official) instead of bitnami (stopped versioned tags)
+  # ===========================================================
+  spark-master:
+    image: apache/spark:3.5.1
+    container_name: spark-master
+    hostname: spark-master
+    user: root
+    env_file: .env
+    command: [ "/opt/spark/sbin/start-master.sh" ]
+    environment:
+      SPARK_NO_DAEMONIZE: "true" # Run foreground to keep Docker container alive
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: 7077
+      SPARK_MASTER_WEBUI_PORT: 8080
+    ports:
+      - "8082:8080" # Spark Master Web UI (8080 is used by kafka-ui)
+      - "7077:7077" # Spark Master port
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+      - ./dataset:/opt/dataset
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # SPARK WORKER — Executes Spark jobs
+  # Limited to 4GB RAM to fit 16GB host machine
+  # ===========================================================
+  spark-worker:
+    image: apache/spark:3.5.1
+    container_name: spark-worker
+    hostname: spark-worker
+    user: root
+    env_file: .env
+    command: [ "/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077" ]
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_MEMORY: 4g
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_WEBUI_PORT: 8081
+    ports:
+      - "8085:8081" # Spark Worker Web UI
+    volumes:
+      - ./spark_jobs:/opt/spark_jobs
+      - ./dataset:/opt/dataset
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # POSTGRESQL — Airflow metadata database
+  # ===========================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    hostname: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # REDIS — Celery message broker for Airflow
+  # ===========================================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # AIRFLOW INIT — Init DB + create admin user
+  # Runs once and exits. Wait for exit code 0 before starting
+  # remaining Airflow services.
+  # ===========================================================
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate && \
+        airflow users create \
+          --username $${AIRFLOW_ADMIN_USER} \
+          --password $${AIRFLOW_ADMIN_PASSWORD} \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email $${AIRFLOW_ADMIN_EMAIL}
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # AIRFLOW WEBSERVER — Web UI
+  # Access: http://localhost:8090
+  # ===========================================================
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8090:8080"
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # AIRFLOW SCHEDULER — Schedules DAG runs
+  # ===========================================================
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # AIRFLOW WORKER — Celery worker executes tasks
+  # Limit RAM to avoid OOM
+  # ===========================================================
+  airflow-worker:
+    <<: *airflow-common
+    container_name: airflow-worker
+    command: celery worker
+    mem_limit: 2g
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # TRINO — Ad-hoc query engine for Iceberg tables
+  # Web UI: http://localhost:8083
+  # ===========================================================
+  trino:
+    image: trinodb/trino:435
+    container_name: trino
+    hostname: trino
+    depends_on:
+      - iceberg-rest
+      - minio
+    ports:
+      - "8083:8080"
+    env_file: .env
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog # Mount catalog configs
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # SUPERSET — Business Intelligence & Dashboard
+  # Access: http://localhost:8088
+  # WARNING: --reload and --debugger flags are for DEVELOPMENT ONLY.
+  # In production, use: gunicorn -w 4 -b 0.0.0.0:8088 "superset.app:create_app()"
+  # ===========================================================
+  superset:
+    image: apache/superset:3.1.0
+    container_name: superset
+    hostname: superset
+    ports:
+      - "8088:8088"
+    env_file: .env
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+    command:
+      - bash
+      - -c
+      - |
+        pip install clickhouse-connect sqlalchemy-trino && \
+        superset db upgrade && \
+        superset fab create-admin \
+          --username $${AIRFLOW_ADMIN_USER:-admin} \
+          --firstname Admin \
+          --lastname User \
+          --email $${AIRFLOW_ADMIN_EMAIL:-admin@example.com} \
+          --password $${AIRFLOW_ADMIN_PASSWORD:-admin123} && \
+        superset init && \
+        superset run -h 0.0.0.0 -p 8088 --with-threads --reload --debugger
+    networks:
+      - lakehouse
+
+# =============================================================
+# VOLUMES — Persistent storage
+# =============================================================
+volumes:
+  minio_data:
+  clickhouse_data:
+  postgres_data:
+
+    # =============================================================
+    # NETWORKS
+    # =============================================================
+networks:
+  lakehouse:
+    driver: bridge

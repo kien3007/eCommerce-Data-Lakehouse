@@ -1,0 +1,17 @@
+FROM apache/airflow:2.8.0
+
+# Switch to root to install Docker CLI
+USER root
+
+# Install docker.io so Airflow Worker can use 'docker exec' to trigger Spark jobs
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends docker.io && \
+    apt-get autoremove -yqq --purge && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Grant airflow user access to docker socket
+RUN usermod -aG docker airflow || true
+
+# Switch back to airflow user
+USER airflow
