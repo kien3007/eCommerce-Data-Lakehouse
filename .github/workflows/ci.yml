@@ -37,6 +37,8 @@ jobs:
     - name: Validate Docker Compose
       run: |
         # docker-compose is usually pre-installed on GitHub ubuntu-latest runners
+        # Create a dummy .env from .env.example so config doesn't fail
+        cp .env.example .env
         # Validate the YAML file structure and syntax
         docker compose config --quiet
 
