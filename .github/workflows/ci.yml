@@ -24,7 +24,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install flake8 pytest pyspark==3.5.1
         # Install apache-airflow and docker provider for DAG syntax checking
-        pip install apache-airflow==2.8.0 apache-airflow-providers-docker==3.9.0
+        pip install apache-airflow==2.8.0 apache-airflow-providers-docker==3.9.0 boto3
 
     - name: Lint with Flake8
       run: |
