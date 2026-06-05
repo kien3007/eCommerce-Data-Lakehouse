@@ -58,6 +58,7 @@ def main():
         .option("kafka.bootstrap.servers", "kafka:29092") \
         .option("subscribe", "log-tracking-raw") \
         .option("startingOffsets", "earliest") \
+        .option("maxOffsetsPerTrigger", 50000) \
         .option("failOnDataLoss", "false") \
         .load()
 
@@ -71,8 +72,8 @@ def main():
         to_timestamp(expr("substring(event_time, 1, 19)"), "yyyy-MM-dd HH:mm:ss")
     )
     
-    logger.info("Starting write stream to lakehouse.bronze.log_tracking...")
-    query = parsed_df.writeStream \
+    logger.info("Starting write stream to lakehouse.bronze.log_tracking (Iceberg)...")
+    iceberg_query = parsed_df.writeStream \
         .format("iceberg") \
         .outputMode("append") \
         .trigger(processingTime="1 minute") \
@@ -80,7 +81,15 @@ def main():
         .option("checkpointLocation", "/opt/spark_jobs/checkpoints/log_tracking/") \
         .start()
         
-    query.awaitTermination()
+    logger.info("Starting live monitoring stream (Console)...")
+    console_query = parsed_df.writeStream \
+        .format("console") \
+        .outputMode("append") \
+        .trigger(processingTime="1 minute") \
+        .option("checkpointLocation", "/opt/spark_jobs/checkpoints/log_tracking_console/") \
+        .start()
+
+    spark.streams.awaitAnyTermination()
 
 if __name__ == "__main__":
     main()
