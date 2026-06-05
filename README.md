@@ -41,7 +41,7 @@ Simultaneously, **Spark Structured Streaming** consumes the same Kafka topic and
 
 ![Real-time Dashboard](images/real-time-dashboard.jpg)
 
-> *Real-time Dashboard powered by ClickHouse: Live User Traffic (Line Chart) and Trending Products (Bar Chart), auto-refreshing every 10 seconds.*
+> *Real-time Dashboard powered by ClickHouse: Live User Traffic and Trending Products, auto-refreshing every 10 seconds.*
 
 ---
 
@@ -75,8 +75,6 @@ Simultaneously, **Spark Structured Streaming** consumes the same Kafka topic and
 │   ├── init_tables.sql.template   # ClickHouse schema (Kafka Engine, MergeTree, Dictionaries, Views)
 │   └── init_clickhouse.py         # Secure credential injection script (Fail-Fast pattern)
 ├── dataset/
-│   ├── 01-log-tracking.csv        # ~9 GB raw e-commerce logs (streaming source)
-│   └── 02-purchase-behavior.csv   # ~200 MB user cohort data (batch source)
 ├── images/
 │   ├── project_architecture.png   # Architecture diagram
 │   └── real-time-dashboard.jpg    # Live dashboard screenshot
@@ -131,8 +129,8 @@ The raw CSV files (~9 GB) are **not included** in this repository (git-ignored d
 
 ```text
 dataset/
-├── 01-log-tracking.csv          # ~9 GB (Real-time streaming source)
-└── 02-purchase-behavior.csv     # ~200 MB (Batch cohort source)
+├── 01-log-tracking.csv          
+└── 02-purchase-behavior.csv 
 ```
 
 ### 3. Spin Up Infrastructure
@@ -212,10 +210,6 @@ make clickhouse-init
 1. Navigate to **Airflow UI**: [http://localhost:8080](http://localhost:8080).
 2. Login with the credentials you configured in `.env` (defaults: `admin` / your password).
 3. **Unpause** the `medallion_pipeline` DAG.
-4. Click the **Trigger (▶️)** button to execute the full pipeline:
-   - **Task 1:** Upload `02-purchase-behavior.csv` to MinIO raw layer.
-   - **Task 2:** Bronze → Silver (Enrich with cohort data + Deduplicate).
-   - **Task 3:** Silver → Gold (Generate 9 analytics tables).
 
 ---
 
@@ -231,40 +225,7 @@ Go to **Settings → Database Connections** and add two databases:
 | **ClickHouse** | `ClickHouse - Speed Layer` | `clickhousedb://default:<your-password>@clickhouse:8123/lakehouse` |
 | **Trino** | `Trino - Iceberg Lakehouse` | `trino://admin@trino:8080/iceberg` |
 
-### Recommended Charts
-
-#### 🔴 Real-time Charts (ClickHouse → `vw_rt_enriched_logs`)
-| Chart | Type | Metrics | Group By |
-| :--- | :--- | :--- | :--- |
-| Live User Traffic | Line Chart | `COUNT(*)` | `event_type` (Time Grain: Minute) |
-| Trending Products | Bar Chart | `COUNT(*)` | `brand` (Top 10, Last 1 hour) |
-| Live Revenue by Cohort | Pie Chart | `SUM(price)` | `cohort_index_week` (purchase only) |
-
-#### 🔵 Historical Charts (Trino → `lakehouse.gold.*`)
-| Chart | Type | Dataset | Key Metrics |
-| :--- | :--- | :--- | :--- |
-| Daily Sales Trend | Mixed Chart | `sales_trend_daily` | `SUM(total_revenue)`, `SUM(total_purchases)` |
-| RFM Segmentation | Pie / Treemap | `rfm_segmentation` | `COUNT(user_id)` by `segment` |
-| Cohort Retention | Heatmap | `weekly_cohort_retention` | `retained_users` by `weeks_after` |
-| Cart Abandonment | Funnel | `cart_abandonment` | `COUNT(user_id)` by `status` |
-| Brand Market Share | Bar Chart | `market_preferences` | `total_revenue` by `brand` |
-| Session Engagement | Scatter | `session_engagement` | `AVG(duration_seconds)` |
-| Time-of-Day Activity | Bubble | `time_of_day_trends` | `total_purchases` by `hour` × `day_of_week` |
-| Market Basket | Table | `market_basket` | `COUNT(user_session)` by `basket` |
-| Category Performance | Treemap | `category_performance` | `SUM(revenue)` by `main_category` |
-
 > **Tip:** Set auto-refresh to **10 seconds** on the Real-time Dashboard tab for a live monitoring experience.
-
----
-
-## 🔐 Security Design (Fail-Fast Pattern)
-
-This project follows the **Fail-Fast** security principle — if any required credential is missing, the system crashes immediately with a clear error message instead of running silently with defaults.
-
-- **No hardcoded passwords** in source code. All secrets live in `.env` (git-ignored).
-- `spark_utils.py` uses `os.environ[]` (raises `KeyError` on missing vars) instead of `os.environ.get()`.
-- `init_clickhouse.py` injects credentials into SQL templates **in-memory only** — no rendered SQL is ever written to disk.
-- `batch_upload.py` and `dag_medallion_pipeline.py` use `os.environ[]` for critical MinIO credentials.
 
 ---
 
@@ -279,22 +240,11 @@ pip install pytest pyspark==3.5.1 apache-airflow==2.8.0 apache-airflow-providers
 pytest tests/ -v
 ```
 
-| Test File | What It Validates |
-| :--- | :--- |
-| `test_spark_jobs.py` | PySpark transformation logic: deduplication, JOIN enrichment, Gold table generation |
-| `test_dags.py` | Airflow DAG integrity: import errors, task IDs, dependency chain order |
-
 ### GitHub Actions CI
 Every push to `main` automatically triggers (`.github/workflows/ci.yml`):
 1. **Flake8 Linting** — Python syntax errors and code style.
 2. **Docker Compose Validation** — YAML structure correctness.
 3. **Pytest Suite** — All unit tests for Spark and Airflow.
-
-### Code Quality Tools
-- **Pre-commit hooks** (`.pre-commit-config.yaml`): Trailing whitespace, YAML validation, Flake8.
-- **Flake8** (`.flake8`): Max line length 120, ignoring E203/W503 for Black compatibility.
-
----
 
 ## 🔮 Future Scope (Production Enhancements)
 
