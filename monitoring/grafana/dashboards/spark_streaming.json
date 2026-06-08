@@ -1,0 +1,152 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "title": "📈 Throughput: Input Rate vs Processing Rate",
+      "description": "Compares the rate of data flowing into Kafka vs how fast Spark processes it. When processingRate drops below inputRate, backpressure is building up.",
+      "type": "timeseries",
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "spanNulls": true,
+            "axisBorderShow": false,
+            "lineInterpolation": "smooth"
+          },
+          "unit": "short",
+          "displayName": "${__name__}"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "A" },
+            "properties": [
+              { "id": "displayName", "value": "Input Rate (rows/sec)" },
+              { "id": "color", "value": { "fixedColor": "#FF6D00", "mode": "fixed" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "displayName", "value": "Processing Rate (rows/sec)" },
+              { "id": "color", "value": { "fixedColor": "#00E676", "mode": "fixed" } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum({__name__=~\".*inputRate.*Value\"})",
+          "legendFormat": "Input Rate"
+        },
+        {
+          "refId": "B",
+          "expr": "sum({__name__=~\".*processingRate.*Value\"})",
+          "legendFormat": "Processing Rate"
+        }
+      ]
+    },
+    {
+      "title": "⏱ Latency: Processing Delay",
+      "description": "Time taken to process each micro-batch. Spikes indicate bottlenecks or resource contention.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "#FF5252", "mode": "fixed" },
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "lineInterpolation": "smooth"
+          },
+          "unit": "ms",
+          "displayName": "Batch Latency"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum({__name__=~\".*latency.*Value\"})",
+          "legendFormat": "Latency (ms)"
+        }
+      ]
+    },
+    {
+      "title": "🖥 JVM Heap Memory Usage",
+      "description": "Spark Driver JVM memory consumption. When Used approaches Max, OutOfMemoryError is imminent.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 10 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "lineInterpolation": "smooth"
+          },
+          "unit": "bytes",
+          "displayName": "${__name__}"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "A" },
+            "properties": [
+              { "id": "displayName", "value": "Heap Used" },
+              { "id": "color", "value": { "fixedColor": "#FFC107", "mode": "fixed" } }
+            ]
+          },
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "displayName", "value": "Max Memory" },
+              { "id": "color", "value": { "fixedColor": "#90A4AE", "mode": "fixed" } },
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [10, 10] } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "metrics_executor_JVMHeapMemory_bytes",
+          "legendFormat": "Heap Used"
+        },
+        {
+          "refId": "B",
+          "expr": "metrics_executor_maxMemory_bytes",
+          "legendFormat": "Max Memory"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["spark", "streaming", "monitoring"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "name": "DS_PROMETHEUS",
+        "query": "prometheus",
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "title": "Spark Streaming Monitor",
+  "uid": "spark-streaming-monitor"
+}

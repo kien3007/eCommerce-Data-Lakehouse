@@ -10,6 +10,8 @@
 ![Trino](https://img.shields.io/badge/Trino-435-DD00A1.svg)
 ![Apache Airflow](https://img.shields.io/badge/Apache%20Airflow-2.8.0-017CEE.svg)
 ![Apache Superset](https://img.shields.io/badge/Apache%20Superset-3.1.0-36C5F0.svg)
+![Prometheus](https://img.shields.io/badge/Prometheus-latest-E6522C.svg)
+![Grafana](https://img.shields.io/badge/Grafana-latest-F46800.svg)
 
 An end-to-end, fully dockerized **Data Lakehouse** pipeline designed to process e-commerce user interaction logs (views, cart additions, purchases). This project demonstrates a production-grade **Medallion Architecture** (Bronze → Silver → Gold) combined with a **Lambda Architecture** (Speed & Batch layers) using the most cutting-edge open-source data tools available today.
 
@@ -17,7 +19,7 @@ An end-to-end, fully dockerized **Data Lakehouse** pipeline designed to process 
 
 ## 🏛 Architecture Overview
 
-![Project Architecture](images/project_architecture.png)
+![Project Architecture](images/project-architecture.png)
 
 This project implements a hybrid **Lambda + Medallion Architecture** with two parallel data paths:
 
@@ -27,8 +29,11 @@ Raw events flow from a **Python Kafka Producer** through **Apache Kafka** direct
 ### 🧊 Batch Layer (Medallion Lakehouse)
 Simultaneously, **Spark Structured Streaming** consumes the same Kafka topic and writes to an **Apache Iceberg** lakehouse on **MinIO**:
 - **Bronze (Raw):** Append-only raw logs ingested every minute.
-- **Silver (Enriched):** Airflow triggers Spark batch jobs to JOIN Bronze logs with static user cohort data, deduplicate, and write enriched data.
-- **Gold (Business Metrics):** Airflow triggers Spark to compute **9 advanced analytics tables** (Sales Trends, RFM Segmentation, Cohort Retention, Cart Abandonment, and more).
+- **Silver (Normalized 3NF):** Airflow triggers Spark batch jobs to decompose raw Bronze logs into a **3NF schema** containing 4 separate tables: `Users`, `Categories`, `Products` (SCD Type 2 for price tracking), and `Events` (Fact table).
+- **Gold (Business Metrics):** Airflow triggers Spark to reconstruct the data using Point-in-Time Joins and compute **9 advanced analytics tables** (Sales Trends, RFM Segmentation, Cohort Retention, Market Preferences, and more).
+
+### 📡 Monitoring Layer
+**Prometheus** scrapes Spark's native metrics (Streaming throughput, Latency, JVM health) and **Grafana** renders them into a pre-provisioned real-time dashboard — enabling proactive alerting and performance monitoring of the entire pipeline.
 
 ### 📊 Serving Layer
 **Apache Superset** connects to both engines:
@@ -36,12 +41,6 @@ Simultaneously, **Spark Structured Streaming** consumes the same Kafka topic and
 - **Trino** → Historical/batch dashboards querying Iceberg Gold tables.
 
 ---
-
-## 📊 Live Dashboard Preview
-
-![Real-time Dashboard](images/real-time-dashboard.jpg)
-
-> *Real-time Dashboard powered by ClickHouse: Live User Traffic and Trending Products, auto-refreshing every 10 seconds.*
 
 ---
 
@@ -55,10 +54,12 @@ Simultaneously, **Spark Structured Streaming** consumes the same Kafka topic and
 | **Batch Processing** | [Apache Spark (PySpark)](https://spark.apache.org/) | Distributed ETL engine for Silver enrichment and Gold aggregation. |
 | **Storage / Data Lake**| [MinIO](https://min.io/) | S3-compatible object storage holding Iceberg data files and raw CSVs. |
 | **Table Format** | [Apache Iceberg](https://iceberg.apache.org/) | ACID transactions, time-travel, and schema evolution for the Data Lakehouse. |
-| **Real-time OLAP** | [ClickHouse](https://clickhouse.com/) | Kafka Engine + Materialized Views + **RAM Dictionaries** for enriched real-time analytics. |
+| **Real-time OLAP** | [ClickHouse](https://clickhouse.com/) | Kafka Engine + Materialized Views + RAM Dictionaries for enriched real-time analytics. |
 | **Query Engine** | [Trino](https://trino.io/) | Distributed SQL engine for ad-hoc queries on Iceberg Gold tables. |
-| **Orchestration** | [Apache Airflow](https://airflow.apache.org/) | Schedules and monitors the batch Spark pipelines via a unified `medallion_pipeline` DAG. |
+| **Orchestration** | [Apache Airflow](https://airflow.apache.org/) | Schedules and monitors the batch Spark pipelines via separate Init and Daily DAGs. |
 | **Visualization** | [Apache Superset](https://superset.apache.org/) | Interactive BI dashboards over both ClickHouse (Live) and Trino (Historical). |
+| **Metrics Collection** | [Prometheus](https://prometheus.io/) | Scrapes Spark Streaming metrics (throughput, latency, JVM) every 5 seconds. |
+| **Observability** | [Grafana](https://grafana.com/) | Pre-provisioned dashboards for real-time monitoring of the streaming pipeline. |
 
 ---
 
@@ -67,39 +68,49 @@ Simultaneously, **Spark Structured Streaming** consumes the same Kafka topic and
 ```text
 .
 ├── .github/workflows/
-│   └── ci.yml                     # GitHub Actions CI (Pytest + Flake8 + Docker Compose validation)
+│   └── ci.yml                        # GitHub Actions CI (Pytest + Flake8 + Docker Compose validation)
 ├── airflow/
 │   └── dags/
-│       └── dag_medallion_pipeline.py  # Unified DAG: Upload CSV → Bronze→Silver → Silver→Gold
+│       ├── dag_daily_medallion_etl.py   # Scheduled DAG: Bronze→Silver → Silver→Gold
+│       └── dag_iceberg_maintenance.py   # Scheduled DAG: Iceberg Compaction & Cleanup
 ├── clickhouse/
-│   ├── init_tables.sql.template   # ClickHouse schema (Kafka Engine, MergeTree, Dictionaries, Views)
-│   └── init_clickhouse.py         # Secure credential injection script (Fail-Fast pattern)
+│   ├── init_tables.sql.template      # ClickHouse schema (Kafka Engine, MergeTree, Dictionaries, Views)
+│   └── init_clickhouse.py            # Secure credential injection script (Fail-Fast pattern)
 ├── dataset/
 ├── images/
-│   ├── project_architecture.png   # Architecture diagram
-│   └── real-time-dashboard.jpg    # Live dashboard screenshot
+│   ├── project-architecture.png      # Architecture diagram
+│   └── real-time-dashboard.jpg       # Live dashboard screenshot
 ├── ingestion/
-│   ├── kafka_producer.py          # Avro Kafka Producer (simulates real-time traffic)
-│   ├── batch_upload.py            # Standalone MinIO uploader (for local testing)
-│   └── requirements.txt           # Python dependencies (confluent-kafka, boto3)
+│   ├── kafka_producer.py             # Avro Kafka Producer (simulates real-time traffic)
+│   ├── batch_upload.py               # Standalone MinIO uploader (for local testing)
+│   └── requirements.txt              # Python dependencies (confluent-kafka, boto3)
+├── monitoring/
+│   ├── prometheus.yml                # Prometheus scrape config (Spark Streaming + Executor metrics)
+│   └── grafana/
+│       ├── provisioning/
+│       │   ├── datasources/datasource.yml  # Auto-provision Prometheus data source
+│       │   └── dashboards/dashboard.yml    # Auto-provision dashboard loader
+│       └── dashboards/
+│           └── spark_streaming.json  # Pre-built dashboard: Throughput, Latency, JVM Health
 ├── spark_jobs/
-│   ├── spark_utils.py             # Centralized SparkSession builder (Fail-Fast credentials)
-│   ├── streaming_to_bronze.py     # Spark Streaming: Kafka → Iceberg Bronze
-│   ├── bronze_to_silver.py        # Spark Batch: Bronze + Cohort JOIN → Silver
-│   └── silver_to_gold.py          # Spark Batch: Silver → 9 Gold analytics tables
+│   ├── spark_utils.py                # Centralized SparkSession builder
+│   ├── streaming_to_bronze.py        # Spark Streaming: Kafka → Iceberg Bronze
+│   ├── bronze_to_silver.py           # Spark Batch: Bronze + Cohort JOIN → Silver
+│   ├── silver_to_gold.py             # Spark Batch: Silver → 9 Gold analytics tables
+│   └── iceberg_maintenance.py        # Spark Batch: Iceberg Compaction & Snapshot Cleanup
 ├── tests/
-│   ├── test_spark_jobs.py         # Unit tests for PySpark transformation logic
-│   └── test_dags.py               # Airflow DAG integrity tests
+│   ├── test_spark_jobs.py            # Unit tests for PySpark transformation logic
+│   └── test_dags.py                  # Airflow DAG integrity tests
 ├── trino/
 │   └── catalog/
-│       └── iceberg.properties     # Trino Iceberg REST catalog connector config
-├── docker-compose.yaml            # Infrastructure-as-Code (16 containerized services)
-├── Dockerfile.airflow             # Custom Airflow image with Docker CLI for spark-submit
-├── Makefile                       # Developer shortcuts (up, produce, spark-stream, test, etc.)
-├── .env.example                   # Environment variables template (credentials)
-├── .pre-commit-config.yaml        # Pre-commit hooks (trailing whitespace, flake8)
-├── .flake8                        # Flake8 linting configuration
-└── .gitignore                     # Excludes .env, dataset CSVs, logs, checkpoints
+│       └── iceberg.properties        # Trino Iceberg REST catalog connector config
+├── docker-compose.yaml               # Infrastructure-as-Code (20+ containerized services)
+├── Dockerfile.airflow                # Custom Airflow image with Docker CLI for spark-submit
+├── Makefile                          # Developer shortcuts (up, upload-cohort, produce, spark-stream, test)
+├── .env.example                      # Environment variables template (credentials)
+├── .pre-commit-config.yaml           # Pre-commit hooks
+├── .flake8                           # Flake8 linting configuration
+└── .gitignore                        # Excludes .env, dataset CSVs, logs, checkpoints
 ```
 
 ---
@@ -151,7 +162,7 @@ make up-step-4
 # ⚠️ Wait for airflow-init container to exit with code 0 before proceeding:
 make up-step-5
 
-# Query & Visualization (Trino, Superset)
+# Query, Visualization & Monitoring (Trino, Superset, Prometheus, Grafana)
 make up-step-6
 ```
 > **Note:** The first run may take 5–10 minutes to download all Docker images and initialize databases.
@@ -185,6 +196,10 @@ make spark-stream
 ```bash
 docker exec -it spark-master /opt/spark/bin/spark-submit \
   --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.apache.spark:spark-avro_2.12:3.5.1,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,org.apache.iceberg:iceberg-aws-bundle:1.5.0 \
+  --conf spark.ui.prometheus.enabled=true \
+  --conf spark.sql.streaming.metricsEnabled=true \
+  --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet \
+  --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus \
   --py-files /opt/spark_jobs/spark_utils.py \
   /opt/spark_jobs/streaming_to_bronze.py
 ```
@@ -193,6 +208,10 @@ docker exec -it spark-master /opt/spark/bin/spark-submit \
 ```powershell
 docker exec -it spark-master /opt/spark/bin/spark-submit `
   --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.apache.spark:spark-avro_2.12:3.5.1,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,org.apache.iceberg:iceberg-aws-bundle:1.5.0 `
+  --conf spark.ui.prometheus.enabled=true `
+  --conf spark.sql.streaming.metricsEnabled=true `
+  --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet `
+  --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus `
   --py-files /opt/spark_jobs/spark_utils.py `
   /opt/spark_jobs/streaming_to_bronze.py
 ```
@@ -206,10 +225,29 @@ make clickhouse-init
 ```
 > This uses a secure Python script (`clickhouse/init_clickhouse.py`) that injects `.env` credentials into the SQL template at runtime — no secrets are ever stored on disk.
 
-### 7. Run Batch Processing Pipelines (Airflow)
-1. Navigate to **Airflow UI**: [http://localhost:8080](http://localhost:8080).
-2. Login with the credentials you configured in `.env` (defaults: `admin` / your password).
-3. **Unpause** the `medallion_pipeline` DAG.
+### 7. Initialize Cohort Data & Run Batch Pipelines
+Upload the static cohort CSV to MinIO once:
+```bash
+make upload-cohort
+```
+
+Then navigate to **Airflow UI**: [http://localhost:8090](http://localhost:8090).
+1. Login with the credentials you configured in `.env` (defaults: `admin` / your password).
+2. **Unpause** the `dag_daily_medallion_etl` DAG for automatic daily Bronze→Silver→Gold processing.
+3. **Unpause** the `dag_iceberg_maintenance` DAG for automated nightly Iceberg compaction.
+
+### 8. Monitor Streaming Pipeline (Grafana)
+1. Navigate to **Grafana UI**: [http://localhost:3000](http://localhost:3000) (login: `admin` / `admin`).
+2. A pre-provisioned **Spark Streaming Monitor** dashboard is automatically available under the **Spark Streaming** folder.
+3. The dashboard displays 3 panels:
+   - **Throughput** — Input Rate vs Processing Rate (rows/sec)
+   - **Latency** — Micro-batch processing delay (ms)
+   - **JVM Health** — Heap memory usage vs Max memory (bytes)
+
+```bash
+# Quick links for monitoring
+make monitor
+```
 
 ---
 
@@ -246,16 +284,12 @@ Every push to `main` automatically triggers (`.github/workflows/ci.yml`):
 2. **Docker Compose Validation** — YAML structure correctness.
 3. **Pytest Suite** — All unit tests for Spark and Airflow.
 
-## 🔮 Future Scope (Production Enhancements)
+## 🔮 Future Scope
 
-While this project is fully functional as a portfolio/MVP, the following improvements would be necessary for a **production-scale deployment** handling terabytes of data daily:
-
-| Area | Current State | Production Enhancement |
-| :--- | :--- | :--- |
-| **Small Files** | Spark Streaming appends micro-batches every minute | Add an Airflow DAG to run Iceberg `rewrite_data_files()` and `expire_snapshots()` nightly |
-| **Gold Layer** | Full recompute via `createOrReplace()` | Switch to `MERGE INTO` (incremental updates) for efficiency at scale |
-| **Alerting** | Manual monitoring via UI | Integrate Airflow Slack/Telegram callbacks + Prometheus/Grafana for Kafka/Spark health |
-| **Scalability** | Single-node Docker Compose | Migrate to Kubernetes (K8s) with Helm charts for horizontal scaling |
+| Area | Future Enhancement |
+| :--- | :--- |
+| **Scalability** | Migrate from Docker Compose to Kubernetes (K8s) with Helm charts for horizontal scaling. |
+| **Transformations**| Integrate `dbt-trino` to manage SQL-based materializations instead of raw PySpark dataframes. |
 
 ---
 

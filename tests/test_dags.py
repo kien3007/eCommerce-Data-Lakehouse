@@ -28,9 +28,9 @@ def test_no_import_errors(dag_bag):
 
 def test_dag_ids_are_expected(dag_bag):
     """
-    Test that the unified medallion pipeline DAG is loaded successfully.
+    Test that the expected DAGs are loaded successfully.
     """
-    expected_dags = ['medallion_pipeline']
+    expected_dags = ['dag_daily_medallion_etl', 'dag_iceberg_maintenance']
     loaded_dags = dag_bag.dags.keys()
 
     for dag_id in expected_dags:
@@ -43,15 +43,14 @@ def test_dags_have_tags(dag_bag):
     for dag_id, dag in dag_bag.dags.items():
         assert dag.tags, f"DAG '{dag_id}' does not have any tags."
 
-def test_medallion_pipeline_task_order(dag_bag):
+def test_daily_dag_task_order(dag_bag):
     """
-    Test that tasks in the medallion pipeline run in the correct order:
-    upload_csv_to_minio >> run_bronze_to_silver >> run_silver_to_gold
+    Test that tasks in the daily medallion DAG run in the correct order:
+    run_bronze_to_silver >> run_silver_to_gold
     """
-    dag = dag_bag.dags['medallion_pipeline']
+    dag = dag_bag.dags['dag_daily_medallion_etl']
     tasks = {t.task_id: t for t in dag.tasks}
 
-    assert 'upload_csv_to_minio' in tasks
     assert 'run_bronze_to_silver' in tasks
     assert 'run_silver_to_gold' in tasks
 
@@ -59,7 +58,5 @@ def test_medallion_pipeline_task_order(dag_bag):
     bronze_task = tasks['run_bronze_to_silver']
     gold_task = tasks['run_silver_to_gold']
 
-    assert 'upload_csv_to_minio' in [t.task_id for t in bronze_task.upstream_list], \
-        "Bronze task should depend on upload task"
     assert 'run_bronze_to_silver' in [t.task_id for t in gold_task.upstream_list], \
         "Gold task should depend on Bronze task"

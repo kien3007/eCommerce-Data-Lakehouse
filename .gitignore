@@ -9,7 +9,7 @@ __pycache__/
 .env.*
 !.env.example
 
-# Large Data Files (Do not push to Git)
+# Large Data Files
 dataset/*.csv
 dataset/*.json
 
@@ -17,9 +17,6 @@ dataset/*.json
 airflow/logs/*
 spark_jobs/checkpoints/*
 
-# System Files
-.DS_Store
-Thumbs.db
 
 # Testing and Coverage
 .pytest_cache/
@@ -30,3 +27,19 @@ htmlcov/
 .vscode/
 .idea/
 *.swp
+*.swo
+
+# Python distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Spark local derby databases
+metastore_db/
+derby.log

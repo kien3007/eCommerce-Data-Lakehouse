@@ -247,9 +247,11 @@ services:
     ports:
       - "8082:8080" # Spark Master Web UI (8080 is used by kafka-ui)
       - "7077:7077" # Spark Master port
+      - "4040:4040" # Spark UI (for Streaming jobs and Prometheus scraper)
     volumes:
       - ./spark_jobs:/opt/spark_jobs
       - ./dataset:/opt/dataset
+    mem_limit: 4g
     networks:
       - lakehouse
 
@@ -276,6 +278,7 @@ services:
     volumes:
       - ./spark_jobs:/opt/spark_jobs
       - ./dataset:/opt/dataset
+    mem_limit: 4g
     networks:
       - lakehouse
 
@@ -428,6 +431,39 @@ services:
           --password $${AIRFLOW_ADMIN_PASSWORD:-admin123} && \
         superset init && \
         superset run -h 0.0.0.0 -p 8088 --with-threads --reload --debugger
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # PROMETHEUS — Metrics Collector
+  # Web UI: http://localhost:9090
+  # ===========================================================
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - lakehouse
+
+  # ===========================================================
+  # GRAFANA — Observability & Dashboards
+  # Web UI: http://localhost:3000
+  # ===========================================================
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
     networks:
       - lakehouse
 

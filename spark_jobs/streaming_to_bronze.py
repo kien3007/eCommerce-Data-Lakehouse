@@ -47,9 +47,11 @@ def main():
             brand STRING,
             price FLOAT,
             user_id STRING,
-            user_session STRING
+            user_session STRING,
+            event_date DATE
         )
         USING iceberg
+        PARTITIONED BY (event_date)
     """)
 
     logger.info("Reading stream from Kafka topic 'log-tracking-raw'...")
@@ -70,6 +72,9 @@ def main():
     parsed_df = parsed_df.withColumn(
         "event_time", 
         to_timestamp(expr("substring(event_time, 1, 19)"), "yyyy-MM-dd HH:mm:ss")
+    ).withColumn(
+        "event_date",
+        expr("to_date(event_time)")
     )
     
     logger.info("Starting write stream to lakehouse.bronze.log_tracking (Iceberg)...")
